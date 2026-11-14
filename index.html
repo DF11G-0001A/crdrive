@@ -433,8 +433,11 @@ Esc 暂停 / 继续
     <select id="line-map-dir">
       <option value="N">北 ↑</option><option value="E">东 →</option>
       <option value="S">南 ↓</option><option value="W">西 ←</option>
+      <option value="NE">东北 ↗</option><option value="SE">东南 ↘</option>
+      <option value="SW">西南 ↙</option><option value="NW">西北 ↖</option>
     </select></div>
-  <div class="lm-tip">地图恒定正北朝上。首站出发方向决定整条线在地图上的走向；
+  <div class="lm-tip">地图恒定正北朝上。首站出发方向决定整条线在地图上的走向，
+    可选 45° 对角；区间弯道「左转45°/右转45°」会让线路净转向并一路斜行，之后车站也斜置。
     不同线路若有同名站，会在该站自动重合，股道交叉时全部保留。
     驾驶中按 0 可在地图视角与驾驶视角之间切换。</div>
 </div>
@@ -832,18 +835,30 @@ function buildLineSegments(line){
       if(avail<100)avail=100;
       let curve=st.curveAfter||'none';
       let curveRadius=CURVE_R;
-      const cm=curve.match(/^([LR])(\d+)(?:@(\d+))?$/);
+      const cm=curve.match(/^([LR])(\d+)(T)?(?:@(\d+))?$/);
       if(cm){
-        if(cm[3])curveRadius=+cm[3];
-        curve=cm[1]+cm[2];
+        if(cm[4])curveRadius=+cm[4];
+        curve=cm[1]+cm[2]+(cm[3]?'T':'');
       }
       const isDiag=(curve==='L45'||curve==='R45');
+      /* 净转向（编码末尾 T = Turn）：只拐一次【不回正】，heading 永久累加，
+         此后所有区间与车站都沿新朝向铺开 —— 这是"全 45° 线路"的基础。 */
+      const tm=curve.match(/^([LR])(\d+)T$/);
+      const turnTheta=tm?(tm[1]==='R'?1:-1)*(+tm[2])*Math.PI/180:0;
+      const isTurn=turnTheta!==0;
       let needLen=0;
       if(curve==='L90'||curve==='R90')needLen=curveRadius*Math.PI/2;
       else if(curve==='L180'||curve==='R180')needLen=curveRadius*Math.PI;
       else if(isDiag)needLen=curveRadius*Math.PI/2;   // 两段 45° 弧 = R*π/4*2
+      else if(isTurn)needLen=Math.abs(curveRadius*turnTheta);
       let doCurve=needLen>0&&needLen<avail*0.9;
-      if(doCurve && isDiag){
+      if(doCurve && isTurn){
+        /* 出站短直 → 单段 deg° 弧 → 剩余沿新朝向直行（不回正） */
+        const lead=(avail-needLen)*0.15;
+        _addStraight(lead);
+        _addArc(curveRadius, turnTheta, false);
+        _addStraight(avail-needLen-lead);
+      }else if(doCurve && isDiag){
         /* 出站后拐 ±45°、斜向直行、快到下一站时反向拐 45° 回正 */
         const sg=curve.charAt(0)==='R'?1:-1;
         const extra=avail-needLen;
@@ -1072,9 +1087,9 @@ function classLabelOf(c){ return CLASS_LABELS[c]||c; }
 // 用于"上行/反向经由"场景——曲线数据挂在原线"本站→下一站"上，反向行进时区间镜像，需翻 L/R。
 function flipCurveLR(c){
   if(!c||c==='none') return 'none';
-  const m=String(c).match(/^([LR])(\d+)(?:@(\d+))?$/);
+  const m=String(c).match(/^([LR])(\d+)(T)?(?:@(\d+))?$/);
   if(!m) return c;
-  return (m[1]==='L'?'R':'L')+m[2]+(m[3]?('@'+m[3]):'');
+  return (m[1]==='L'?'R':'L')+m[2]+(m[3]?'T':'')+(m[4]?('@'+m[4]):'');
 }
 // 把经由链拼成一条"复合线路"（任务地图）。任何不一致都会抛中文错误
 function buildCompositeLine(task){
@@ -4873,6 +4888,8 @@ const CURVE_OPTIONS=[
   {v:'R90',       t:'右90弯(400)'},
   {v:'L45',       t:'斜左45(400)'},
   {v:'R45',       t:'斜右45(400)'},
+  {v:'L45T',      t:'左转45°(400)'},
+  {v:'R45T',      t:'右转45°(400)'},
   {v:'L180',      t:'左180弯(400)'},
   {v:'R180',      t:'右180弯(400)'},
   {v:'L180@280',  t:'左180弯(280)'},
@@ -5105,7 +5122,9 @@ const CURVE_ALIAS = {
   'l90':'L90','左90':'L90','r90':'R90','右90':'R90',
   'l180':'L180','左180':'L180','r180':'R180','右180':'R180',
   'l45':'L45','左45':'L45','斜左45':'L45','斜左':'L45','左':'L45',
-  'r45':'R45','右45':'R45','斜右45':'R45','斜右':'R45','右':'R45'
+  'r45':'R45','右45':'R45','斜右45':'R45','斜右':'R45','右':'R45',
+  'l45t':'L45T','r45t':'R45T','l转45':'L45T','r转45':'R45T',
+  '左转45':'L45T','右转45':'R45T','转左45':'L45T','转右45':'R45T'
 };
 const BIG_YES = ['是','1','y','yes','true','大','大站','停','停靠'];
 const BIG_NO  = ['否','0','n','no','false','小','小站','过','通过'];
@@ -5122,8 +5141,8 @@ function normCurve(tok){
   const t = String(tok).trim().replace(/斜/g,'').replace(/左/g,'L').replace(/右/g,'R');
   const low = t.toLowerCase();
   if(CURVE_ALIAS[low] !== undefined) return CURVE_ALIAS[low];
-  const m = /^([lr])(45|90|180)(?:@(\d{2,3}))?$/.exec(low);
-  if(m) return m[1].toUpperCase() + m[2] + (m[3] ? '@'+m[3] : '');
+  const m = /^([lr])(45|90|180)(t)?(?:@(\d{2,3}))?$/.exec(low);
+  if(m) return m[1].toUpperCase() + m[2] + (m[3] ? 'T' : '') + (m[4] ? '@'+m[4] : '');
   return null;
 }
 
@@ -5624,7 +5643,12 @@ const MAP_DIRS = {
   N: {t:'北 ↑', dx: 0, dy:-1},
   E: {t:'东 →', dx: 1, dy: 0},
   S: {t:'南 ↓', dx: 0, dy: 1},
-  W: {t:'西 ←', dx:-1, dy: 0}
+  W: {t:'西 ←', dx:-1, dy: 0},
+  /* 45° 对角：整条线从首站就沿对角方向铺开，所有车站随之斜置 */
+  NE:{t:'东北 ↗', dx: 0.7071, dy:-0.7071},
+  SE:{t:'东南 ↘', dx: 0.7071, dy: 0.7071},
+  SW:{t:'西南 ↙', dx:-0.7071, dy: 0.7071},
+  NW:{t:'西北 ↖', dx:-0.7071, dy:-0.7071}
 };
 /* 与游戏 buildLineSegments / sideOffsetForStation 一致的几何常量（世界单位）
    1 km = 200 世界单位；每站前后各 180 直线；站内岔线范围 ±180、平行段 ±80 */
@@ -5694,6 +5718,8 @@ function sidingLegsOf(st,single){
    curveAfter 属于【本站】，描述本站→下一站区间的转向：
      L90/R90  → heading ∓/+90°；L180/R180 → 连续两个同向 90°；@数字 = 半径(世界单位)
      L45/R45  → 出站拐 ∓/+45°、斜向直行、到站前反向拐 45° 回正（净方向不变、横向平移）
+     L45T/R45T（通用 L/R+度数+T）→ 净转向：单段 ±deg° 弧【不回正】，
+                   heading 累加后一路保持，之后所有区间与车站都沿该方向铺开。
      仅当 弧长 radius*θ < 区间可用长度*0.9 时弯道生效，否则该区间仍是直线。
    返回 path（含累计里程 cum，世界单位）与 stations（含站中心 cum 与 heading）。 */
 function buildMapLineGeom(line){
@@ -5736,14 +5762,26 @@ function buildMapLineGeom(line){
       let avail=phys-2*MAP_SEG_HALF;
       if(avail<100)avail=100;
       let curve=st.curveAfter||'none', radius=MAP_CURVE_R;
-      const cm=String(curve).match(/^([LR])(\d+)(?:@(\d+))?$/);
-      if(cm){ if(cm[3])radius=+cm[3]; curve=cm[1]+cm[2]; }
+      const cm=String(curve).match(/^([LR])(\d+)(T)?(?:@(\d+))?$/);
+      if(cm){ if(cm[4])radius=+cm[4]; curve=cm[1]+cm[2]+(cm[3]?'T':''); }
       const isDiag=(curve==='L45'||curve==='R45');
+      /* 净转向曲线：末尾 T = Turn，只拐一次不回正，heading 永久累加 */
+      const tm=curve.match(/^([LR])(\d+)T$/);
+      const turnTheta=tm?(tm[1]==='R'?1:-1)*(+tm[2])*Math.PI/180:0;
+      const isTurn=turnTheta!==0;
       let need=0;
       if(curve==='L90'||curve==='R90')need=radius*Math.PI/2;
       else if(curve==='L180'||curve==='R180')need=radius*Math.PI;
       else if(isDiag)need=radius*Math.PI/2;   // 两段 45° 弧 = R*π/4*2
-      if(need>0 && need<avail*0.9 && isDiag){
+      else if(isTurn)need=Math.abs(radius*turnTheta);
+      if(need>0 && need<avail*0.9 && isTurn){
+        /* 出站短直 → 单段 deg° 弧（不回正）→ 剩余沿新朝向直行。
+           本站之后所有区间和车站自然都落在这条 45° 斜线上。 */
+        const lead=(avail-need)*0.15;
+        straight(lead);
+        arc(radius,turnTheta);
+        straight(avail-need-lead);
+      }else if(need>0 && need<avail*0.9 && isDiag){
         /* 斜行：出站拐 ±45° → 斜向直行 → 到站前反向拐 45° 回正。
            与 3D buildLineSegments 用完全相同的分段，累计里程可严格对拍。 */
         const sg=curve.charAt(0)==='R'?1:-1;
@@ -5769,8 +5807,13 @@ function buildMapLineGeom(line){
 }
 
 function mapRotOf(dir){
-  /* 游戏初始 heading=0 的方向向量是 (0,1)。旋转到 dir：S 不动，E 转 -90°，W 转 +90°，N 转 180° */
-  return dir==='N'?Math.PI : dir==='E'?-Math.PI/2 : dir==='W'?Math.PI/2 : 0;
+  /* 局部方向 (sin h, cos h) 经 X 镜像+旋转后为 (-sin(h+φ), cos(h+φ))。
+     φ 自「南」起算、向西为正：S=0, W=+90°, N=180°, E=-90°。
+     对角方向取相邻两者的中点，即可让整条线沿 45° 铺开（车站切线同步斜置）。 */
+  const R=Math.PI/180;
+  const T={ S:0, SW:45*R, W:90*R, NW:135*R, N:180*R,
+            NE:-135*R, E:-90*R, SE:-45*R };
+  return T[dir]!==undefined?T[dir]:0;
 }
 function mapBoundsOf(lines){
   if(!lines.length) return {minX:-10,maxX:10,minY:-10,maxY:10};
