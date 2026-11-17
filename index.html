@@ -3440,8 +3440,56 @@ function dispatchNextTarget(st){
   if(idx+1<sch.length) return String(sch[idx+1].name||'').trim()||null;
   return null;
 }
+/* 方向敏感的"报去向"判定（用户 2026-11-17）：
+   枢纽只是"报"的必要条件而非充分条件 —— 只有当【列车前进方向】上
+   该站还有另一条不同的走法（别的线路/别的邻站）时才报"去X站方向"。
+   例：天津站向北接多条线，但向南出发时前进方向只有一条走法 → 不报；
+       南仓站向南去津山线、向西去天津西，两个方向各有走法 → 报。
+   前进方向取"当前站→前方目标站 a"的地图向量（同名站已重合），
+   再统计该站所有线路的邻站里，与 a 同向（点积>0.35）且不等于 a 的走法。 */
+function dispatchForwardBranch(st){
+  if(!dispatchIsHub(st))return false;
+  const nm=String(st.name||'').trim();
+  const a=dispatchNextTarget(st);
+  if(!nm||!a)return false;
+  let lay=MAP_LAYOUT_CACHE;
+  if(!lay||!lay.lines.length){
+    try{ lay=buildMapLayout(MAP_SEL,taskMapKeys()); MAP_LAYOUT_CACHE=lay; }catch(e){ lay=null; }
+  }
+  if(!lay||!lay.lines.length)return false;
+  /* 收集该站坐标与所有邻站（各线路前后各一），同名站坐标重合 */
+  let S=null; const nb=[];
+  for(const L of lay.lines){
+    const ss=L.stations;
+    for(let i=0;i<ss.length;i++){
+      if(String(ss[i].name||'').trim()!==nm)continue;
+      if(!S)S={x:ss[i].x,y:ss[i].y};
+      if(i>0)nb.push(String(ss[i-1].name||'').trim());
+      if(i+1<ss.length)nb.push(String(ss[i+1].name||'').trim());
+    }
+  }
+  if(!S)return false;
+  /* 前方目标站 a 的坐标：任意线路里同名站均可（已重合） */
+  let A=null;
+  for(const L of lay.lines)for(const s of L.stations)
+    if(String(s.name||'').trim()===a){A={x:s.x,y:s.y};break;}
+  if(!A)return false;
+  const fx=A.x-S.x, fy=A.y-S.y, fl=Math.hypot(fx,fy);
+  if(fl<1e-9)return false;
+  for(const name of nb){
+    if(!name||name===a)continue;
+    let Q=null;
+    for(const L of lay.lines)for(const s of L.stations)
+      if(String(s.name||'').trim()===name){Q={x:s.x,y:s.y};break;}
+    if(!Q)continue;
+    const vx=Q.x-S.x, vy=Q.y-S.y, vl=Math.hypot(vx,vy);
+    if(vl<1e-9)continue;
+    if((fx*vx+fy*vy)/(fl*vl)>0.35)return true;   // 同向的另一条走法
+  }
+  return false;
+}
 function dispatchSuffix(st){
-  if(!dispatchIsHub(st))return '';
+  if(!dispatchForwardBranch(st))return '';
   const a=dispatchNextTarget(st);
   if(!a)return '';
   return '，去'+a.replace(/站$/,'')+'站方向';
@@ -6272,10 +6320,31 @@ function drawMapHud(g,w,h,layout,v){
 }
 
 /* ---------------- 地图准备 / 切换 ---------------- */
+/* 任务经由线路 + 所有与经由站【同名】的其它线路（一层）。
+   用户 2026-11-17：驾驶地图要把经由站连接的所有区间都按实体画出来，
+   所以这些支线即使没勾选加入地图，驾驶时也要纳入布局（同名站自动重合）。
+   非同名站的几何交叉不算连接，不在此列。 */
+function taskMapKeys(){
+  const task=(typeof currentTaskKey!=='undefined'&&TASKS[currentTaskKey])||
+             (typeof selTaskKey!=='undefined'&&TASKS[selTaskKey])||null;
+  const via=(task&&Array.isArray(task.via))
+    ? task.via.map(v=>v.lineId).filter(k=>!!LINES[k]) : [];
+  const keys=via.slice();
+  if(!keys.length) return keys;
+  const names=new Set();
+  for(const k of keys)
+    for(const s of (LINES[k].stations||[])) names.add(String(s.name||'').trim());
+  for(const k in LINES){
+    if(keys.indexOf(k)>=0) continue;
+    const ln=LINES[k];
+    if(ln&&Array.isArray(ln.stations)&&
+       ln.stations.some(s=>names.has(String(s.name||'').trim()))) keys.push(k);
+  }
+  return keys;
+}
 function mapPrepare(refit){
   const task=TASKS[currentTaskKey];
-  MAP_TASK_KEYS=(task&&Array.isArray(task.via))
-    ? task.via.map(v=>v.lineId).filter(k=>!!LINES[k]) : [];
+  MAP_TASK_KEYS=taskMapKeys();
   VIA_SEGS=buildViaSegs(task);
   /* 优先选一张包含当前经由线路的地图 */
   if(MAP_TASK_KEYS.length){
