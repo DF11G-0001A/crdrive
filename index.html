@@ -256,6 +256,7 @@ line-height:1.5;text-align:right;font-family:monospace;pointer-events:none}
 <button class="nav-btn" data-page="lines"><span class="nb-i">═</span>线路库</button>
 <button class="nav-btn" data-page="tasks"><span class="nb-i">≡</span>任务库</button>
 <button class="nav-btn" data-page="map"><span class="nb-i">◇</span>路网地图</button>
+<button class="nav-btn" data-page="profile"><span class="nb-i">◆</span>我的档案</button>
 </nav>
 <div class="sb-foot">左栏切页面<br>右栏做操作</div>
 </aside>
@@ -277,6 +278,12 @@ line-height:1.5;text-align:right;font-family:monospace;pointer-events:none}
 <div class="panel-value" id="home-task-name">—</div>
 <div class="panel-sub" id="home-task-info">—</div>
 </div>
+<div class="panel">
+<div class="panel-label">我的驾驶记录</div>
+<div class="panel-value" id="home-prof-km">—</div>
+<div class="panel-sub" id="home-prof-time">—</div>
+<div class="panel-sub" id="home-prof-lv" style="margin-top:2px;color:#93c5fd">—</div>
+</div>
 <button class="btn green big" id="start-btn">开始驾驶</button>
 <div class="panel">
 <div class="panel-label" style="margin-bottom:8px">保存的游戏</div>
@@ -284,6 +291,20 @@ line-height:1.5;text-align:right;font-family:monospace;pointer-events:none}
 </div>
 </section>
 
+
+<section id="page-profile" class="page" style="display:none">
+<h2 class="page-title">我的档案</h2>
+<div class="panel">
+<div class="panel-label" style="margin-bottom:8px">司机姓名</div>
+<div class="row"><input id="prof-name" maxlength="12" placeholder="输入你的名字" style="flex:1;background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:8px 10px;color:#e8eef7;font-size:14px"><button class="btn green sm" id="prof-save-name">保存</button></div>
+</div>
+<div class="panel" id="prof-lv-box"></div>
+<div class="panel" id="prof-stats"></div>
+<div class="panel">
+<div class="panel-label" style="margin-bottom:8px">成就</div>
+<div class="list" id="prof-ach" style="display:flex;flex-direction:column;gap:8px"></div>
+</div>
+</section>
 <section id="page-lines" class="page" style="display:none">
 <h2 class="page-title">线路库</h2>
 <div class="btn-row">
@@ -3448,15 +3469,26 @@ function dispatchNextTarget(st){
    前进方向取"当前站→前方目标站 a"的地图向量（同名站已重合），
    再统计该站所有线路的邻站里，与 a 同向（点积>0.35）且不等于 a 的走法。 */
 function dispatchForwardBranch(st){
-  if(!dispatchIsHub(st))return false;
   const nm=String(st.name||'').trim();
   const a=dispatchNextTarget(st);
   if(!nm||!a)return false;
-  let lay=MAP_LAYOUT_CACHE;
-  if(!lay||!lay.lines.length){
-    try{ lay=buildMapLayout(MAP_SEL,taskMapKeys()); MAP_LAYOUT_CACHE=lay; }catch(e){ lay=null; }
+  /* 不能只信 MAP_LAYOUT_CACHE：startGame 的出生播报发生在 mapPrepare 之前，
+     且缓存可能是主页地图页留下的另一张图。按当前任务现算一份，保证真实驾驶态生效。 */
+  let lay=null;
+  try{ lay=buildMapLayout(MAP_SEL,taskMapKeys()); }catch(e){ lay=null; }
+  if(!lay||!lay.lines.length) return false;
+  /* 前进方向 = 【列车实际经由线路】上该站的出站切线（st.dx,st.dy），
+     不是"本站→下一站中心"的连线 —— 首站带 R180 掉头时两者正好相反
+     （用户真实数据：北京站首站向东，R180 后北京南在南边，连线朝南但出站朝东）。
+     没有经由切线时才退回连线方向。 */
+  const mine=taskMapKeys();   // 现算，不读全局：出生播报时 MAP_TASK_KEYS 还没被 mapPrepare 设置
+  let fwd=null;
+  for(const L of lay.lines){
+    if(mine.indexOf(L.key)<0)continue;
+    for(const s of L.stations)
+      if(String(s.name||'').trim()===nm && s.dx!==undefined){fwd={x:s.dx,y:s.dy};break;}
+    if(fwd)break;
   }
-  if(!lay||!lay.lines.length)return false;
   /* 收集该站坐标与所有邻站（各线路前后各一），同名站坐标重合 */
   let S=null; const nb=[];
   for(const L of lay.lines){
@@ -3469,12 +3501,14 @@ function dispatchForwardBranch(st){
     }
   }
   if(!S)return false;
-  /* 前方目标站 a 的坐标：任意线路里同名站均可（已重合） */
-  let A=null;
-  for(const L of lay.lines)for(const s of L.stations)
-    if(String(s.name||'').trim()===a){A={x:s.x,y:s.y};break;}
-  if(!A)return false;
-  const fx=A.x-S.x, fy=A.y-S.y, fl=Math.hypot(fx,fy);
+  if(!fwd){
+    let A=null;
+    for(const L of lay.lines)for(const s of L.stations)
+      if(String(s.name||'').trim()===a){A={x:s.x,y:s.y};break;}
+    if(!A)return false;
+    fwd={x:A.x-S.x, y:A.y-S.y};
+  }
+  const fl=Math.hypot(fwd.x,fwd.y);
   if(fl<1e-9)return false;
   for(const name of nb){
     if(!name||name===a)continue;
@@ -3484,7 +3518,7 @@ function dispatchForwardBranch(st){
     if(!Q)continue;
     const vx=Q.x-S.x, vy=Q.y-S.y, vl=Math.hypot(vx,vy);
     if(vl<1e-9)continue;
-    if((fx*vx+fy*vy)/(fl*vl)>0.35)return true;   // 同向的另一条走法
+    if((fwd.x*vx+fwd.y*vy)/(fl*vl)>0.35)return true;   // 同向的另一条走法
   }
   return false;
 }
@@ -3694,6 +3728,7 @@ function endGame(failed, reason){
   cancelCruise();
   lastResultFailed = !!failed;
   showResultUI(failed, reason);
+  appendResultProfile(profileRecordRun(failed));
   applyChrome();
 }
 
@@ -3814,9 +3849,9 @@ function drawLKJ(){
     const st=getDisplaySignalState(nextSig);
     const labels={green:'绿灯',greenYellow:'绿黄灯',yellow2:'黄灯',redYellow:'红黄灯',doubleYellow:'双黄灯',red:'红灯'};
     ctx.fillStyle='#0a0a0a';
-    ctx.fillRect(x+312,y+62,22,60);
+    ctx.fillRect(x+312,y+58,22,52);
     ctx.strokeStyle='#333';
-    ctx.strokeRect(x+312,y+62,22,60);
+    ctx.strokeRect(x+312,y+58,22,52);
     const on=[
       st==='green'||st==='greenYellow',
       st==='greenYellow'||st==='yellow2'||st==='redYellow'||st==='doubleYellow',
@@ -3826,21 +3861,21 @@ function drawLKJ(){
     const cols=['#22c55e','#eab308','#ef4444','#eab308'];
     for(let k=0;k<4;k++){
       ctx.beginPath();
-      ctx.arc(x+323,y+68+k*14,4.5,0,Math.PI*2);
+      ctx.arc(x+323,y+64+k*13,4.3,0,Math.PI*2);
       ctx.fillStyle=on[k]?cols[k]:'#222';
       ctx.fill();
     }
     ctx.fillStyle='#e8eef7';
     ctx.font='bold 11px sans-serif';
     ctx.textAlign='center';
-    ctx.fillText(labels[st],x+323,y+135);
+    ctx.fillText(labels[st],x+323,y+126);
     ctx.textAlign='left';
   }
 
   ctx.fillStyle='#fbbf24';
   ctx.font='bold 13px sans-serif';
   ctx.textAlign='center';
-  ctx.fillText('得分 '+score,x+340,y+84);
+  ctx.fillText('得分 '+score,x+370,y+84);
   ctx.textAlign='left';
 
   let stateText={
@@ -3870,7 +3905,10 @@ function drawLKJ(){
 
 function drawMessage(){
   if(messageTimer<=0||gameOver)return;
-  const bw=720,bh=50;
+  ctx.font='bold 17px sans-serif';
+  const tw=ctx.measureText(message).width;
+  const bw=Math.max(300,Math.min(W-48,tw+80));
+  const bh=52;
   const bx=W/2-bw/2,by=14;
   ctx.fillStyle='rgba(8,14,24,0.9)';
   ctx.fillRect(bx,by,bw,bh);
@@ -3880,7 +3918,9 @@ function drawMessage(){
   ctx.fillStyle='#ffe082';
   ctx.font='bold 17px sans-serif';
   ctx.textAlign='center';
-  ctx.fillText(message,W/2,by+32);
+  ctx.textBaseline='middle';
+  ctx.fillText(message,W/2,by+bh/2+0.5);
+  ctx.textBaseline='alphabetic';
   ctx.textAlign='left';
 }
 
@@ -3922,6 +3962,7 @@ function render(){
   drawGroundWorld();
   drawMountainsEarly();
   drawSceneryLayer();
+  drawBranchTracks('scenery');
   // 洞内：岩体铺满画面 + 洞壁拱顶（只留出口洞口露外景；钢轨/接触网随后绘制，故洞内可见）
   if(_curTunnel){ drawTunnelRock(_curTunnel); drawTunnelShell(_curTunnel); }
 
@@ -3940,7 +3981,9 @@ function render(){
   drawCatenaryRange(fL,fH);
   drawStationGantryRange(fL,fH);
   drawSideWiresRange(fL,fH);
+  drawBranchTracks('catenary');
   drawBallast();
+  drawBranchTracks('ballast');
 
   for(const st of currentStations){
     if(!isTe(st))continue;
@@ -3948,7 +3991,10 @@ function render(){
     drawTunnelInterior(st);
   }
   drawPlatforms();
+  drawBranchTracks('platform');
   drawSleepers();
+  drawBranchTracks('sleeper');
+  drawBranchTracks('rails');
   drawRails();
 
   if(nearS){
@@ -4088,7 +4134,7 @@ const pauseUI=document.getElementById('pause-ui');
 const resultUI=document.getElementById('result-ui');
 const ALL_SCREENS=[editorUI,lineEditorUI,pauseUI,resultUI];
 const shellEl=document.getElementById('shell');
-const PAGES=['drive','lines','tasks','map'];
+const PAGES=['drive','lines','tasks','map','profile'];
 let currentPage='drive';
 let editorReturnPage='drive';      // 从哪个页面进的编辑器，返回时回哪儿
 let taskFilterLineId='';           // '' = 全部线路
@@ -4124,6 +4170,7 @@ function showPage(name){
   else if(name==='lines') renderLineLib();
   else if(name==='tasks') renderTaskLib();
   else if(name==='map') renderMapPage();
+  else if(name==='profile') renderProfile();
 }
 // 回到左栏某个页面（关掉编辑器 / 结算 / 暂停等全屏层）
 function backToPage(page){
@@ -4207,12 +4254,14 @@ function renderDrive(){
   document.getElementById('home-task-info').textContent = task?taskInfoText(task)
     :'还没有车次，去「任务库」新建一个或导入一个';
   renderSaveList();
+  renderHomeProfile();
 }
 function refreshHome(){
   renderDrive();
   if(currentPage==='lines') renderLineLib();
   else if(currentPage==='tasks') renderTaskLib();
   else if(currentPage==='map') renderMapPage();
+  else if(currentPage==='profile') renderProfile();
 }
 function rebuildTaskSelect(){ refreshHome(); }   // 旧调用点保留兼容
 
@@ -4647,6 +4696,7 @@ function startGame(){
   showScreen(null);
   appState='PLAYING';
   mapPrepare(true);
+  profileBeginRun();
   applyChrome();
 }
 
@@ -6491,8 +6541,664 @@ function readMapFields(line){
   line.map={enabled:!!en.checked,name:sel.value||MAP_DEFAULT_NAME,dir:dr.value};
 }
 
-/* 3D 任务场景只渲染当前经由，不再画「非经由线路岔出去」的支线（已按用户要求撤销）。
-   地图里的多线路合并保留，两者互不影响。 */
+/* ================= 3D 驾驶场景：岔路 = 独立且平等的线路 =================
+   用户原话："你怎么画的任务线路，你就怎么画岔路。岔路和主线没有半毛钱
+   关系，岔路依托于 localStorage 中的线路信息，唯一区别是摄像头没有沿着
+   岔路走。"
+   实现：岔路就是一条完整的线路实体——
+   1) 几何：buildMapLineGeom(ln)（与主线 buildLineSegments 同源算法），锚定
+      在与主线【同名站】的世界位置上（切线对齐 + 横向错开，不压主线站台）；
+   2) 画法：完整复刻主线 drawBallast/drawSleepers/drawRails/drawOnePlatform
+      ——复线两股道砟+钢轨+轨枕、每站侧线（stationLegs 模板 + 同一条
+      sideOffsetForStation 平滑曲线）、站台（顶/立面/坡/黄色安全线，
+      platW/platH 按车站等级），材质颜色与主线完全一致；
+   3) 绘制窗口跟随列车（岔路上与列车平行的位置 ± 视程），超出主线锚站
+      太远（>3200）整条不画，保持性能与场景干净。
+   ======================================================================== */
+const G_BR=0.7175;   // 钢轨中心距（与主线 drawRails 的 G 一致）
+let BRANCH_CACHE=null;
+
+function buildBranches(){
+  const task=TASKS[currentTaskKey];
+  const sig=(currentTaskKey||'')+'|'+((task&&task.via&&JSON.stringify(task.via))||'');
+  if(BRANCH_CACHE&&BRANCH_CACHE.sig===sig) return BRANCH_CACHE.list;
+  const list=[];
+  const via=(task&&task.via)||[];
+  const mainKey=via.length?via[0].lineId:'';
+  for(const k of taskMapKeys()){
+    if(k===mainKey) continue;
+    const ln=LINES[k];
+    if(!ln||!Array.isArray(ln.stations)||ln.stations.length<2) continue;
+    try{ const br=makeBranch(ln,k); if(br) list.push(br); }catch(e){}
+  }
+  BRANCH_CACHE={sig:sig,list:list};
+  return list;
+}
+
+/* 把一条线路变成 3D 世界里的独立线路实体：
+   锚站 = 第一个与主线 STATION_DEFS 同名的站；以主线该站世界坐标为锚，
+   切线对齐旋转 th=主线heading-岔路heading，再沿主线右法线错开 D。 */
+function makeBranch(ln,lineKey){
+  const g=buildMapLineGeom(ln);
+  const single=!!lineIsSingle(ln);
+  let bst=null, mst=null;
+  for(const s of g.stations){
+    const d=STATION_DEFS.find(x=>x.name===s.name);
+    if(d){ bst=s; mst=d; break; }
+  }
+  if(!bst||!mst) return null;
+  const anchor=centerLine(mst.center);
+  if(!anchor) return null;
+  const th=anchor.heading-bst.h;
+  const ct=Math.cos(th), sn=Math.sin(th);
+  /* 横向错开 D=0：与地图完全一致——同名站严格重合、四条道叠在一起，
+     出站后由各自真实几何（主线 R180 掉头 / 岔路直行）自然分开。 */
+  const D=0;
+  const nx=Math.cos(anchor.heading), nz=-Math.sin(anchor.heading);
+  const ax=anchor.x+nx*D, az=anchor.z+nz*D;
+  const R=(x,z)=>({x:ax+(x-bst.x)*ct+(z-bst.y)*sn,
+                   z:az-(x-bst.x)*sn+(z-bst.y)*ct});
+  const path=g.path.map(p=>{const q=R(p.x,p.y);return{x:q.x,z:q.z,cum:p.cum};});
+  for(let i=0;i<path.length;i++){
+    const a=path[Math.max(0,i-1)], b=path[Math.min(path.length-1,i+1)];
+    path[i].h=Math.atan2(b.x-a.x,b.z-a.z);
+  }
+  const stations=g.stations.map(s=>{
+    const q=R(s.x,s.y);
+    return {name:s.name, center:s.cum, cls:s.cls, big:s.cls==='te',
+            _single:single, _side:s.side||-1};
+  });
+  /* 岔路布景：两侧树/小房（与主线 buildScenery 同类），只生成锚站附近约 5km */
+  const scenery=[];
+  let ss=Math.max(bst.cum-600,0);
+  const sEnd=Math.min(bst.cum+4600, path[path.length-1].cum);
+  while(ss<sEnd){
+    let inSt=false;
+    for(const s2 of stations) if(Math.abs(ss-s2.center)<200){inSt=true;break;}
+    if(inSt){ss+=30;continue;}
+    const side=Math.random()<0.5?-1:1;
+    if(Math.random()<0.82){
+      scenery.push({s:ss,side:side,offset:9+Math.random()*40,size:6+Math.random()*9});
+    }else{
+      scenery.push({s:ss,side:side,offset:22+Math.random()*45,
+                    w:6+Math.random()*7,h:4+Math.random()*3,d:8+Math.random()*6,house:true});
+    }
+    ss+=9+Math.random()*16;
+  }
+  return {name:ln.name||'', key:lineKey||'', single:single, path:path, stations:stations,
+          trackEnd:path[path.length-1].cum, scenery:scenery,
+          anchorS:mst.center, anchorCum:bst.cum};
+}
+
+/* 岔路里程 s → 世界坐标（path 插值；返回 {x,z,h}） */
+let _bpIdx=0;
+function branchPoint(br,s){
+  const P=br.path;
+  s=Math.max(P[0].cum, Math.min(br.trackEnd, s));
+  if(_bpIdx<0||_bpIdx>=P.length-1)_bpIdx=0;
+  while(_bpIdx>0&&P[_bpIdx].cum>s)_bpIdx--;
+  while(_bpIdx<P.length-2&&P[_bpIdx+1].cum<s)_bpIdx++;
+  const a=P[_bpIdx], b=P[Math.min(P.length-1,_bpIdx+1)];
+  const t=(b.cum>a.cum)?clamp((s-a.cum)/(b.cum-a.cum),0,1):0;
+  return {x:a.x+(b.x-a.x)*t, z:a.z+(b.z-a.z)*t, h:a.h};
+}
+
+/* 岔路版 fillPolyTrack：pts=[{offset,y,s}]（s=岔路里程），同一透视投影。
+   车灯提亮用「主线等效里程」近似（锚点对齐处的距离感一致）。 */
+function fillPolyBranch(br,pts,fill,skipBoost){
+  const w=[];
+  let avg=0;
+  for(const p of pts){
+    const q=branchPoint(br,p.s);
+    const cx=Math.cos(q.h), sz=-Math.sin(q.h);   // 右法线
+    w.push(worldToCam(q.x+cx*p.offset, p.y, q.z+sz*p.offset));
+    avg+=p.s;
+  }
+  avg/=pts.length;
+  const c=clipCam(w,Z_NEAR);
+  if(c.length<3) return;
+  ctx.beginPath();
+  for(let i=0;i<c.length;i++){
+    const sx=W*0.5+FOCAL*c[i].x/c[i].z;
+    const sy=HORIZON+FOCAL*(CAM_Y-c[i].y)/c[i].z;
+    if(i===0)ctx.moveTo(sx,sy); else ctx.lineTo(sx,sy);
+  }
+  ctx.closePath();
+  let boost=0;
+  if(!skipBoost) boost=hlBoostAt(br.anchorS+(avg-br.anchorCum));
+  ctx.fillStyle=boost>0?hlBrighten(fill,boost):fill;
+  ctx.fill();
+}
+
+/* 岔路车站配线：与主线 stationLegs 同模板（岔路是独立线路，
+   不参与主线单↔复线交界判定，按自身 trackType 画）。 */
+function branchLegs(br,st){
+  return br.single ? [{baseX:LX,sign:st._side}]
+                   : [{baseX:LX,sign:-1},{baseX:RX,sign:+1}];
+}
+
+/* 岔路里程 → 屏幕坐标（与 projectTrack 完全同一套透视投影） */
+function projectBranch(br,offset,y,s){
+  const q=branchPoint(br,s);
+  const cx=Math.cos(q.h), sz=-Math.sin(q.h);      // 右法线
+  const c=worldToCam(q.x+cx*offset, y, q.z+sz*offset);
+  if(c.z<Z_NEAR) return null;
+  return {x:W*0.5+FOCAL*c.x/c.z, y:HORIZON+FOCAL*(CAM_Y-c.y)/c.z, z:c.z};
+}
+
+/* 杆底是否落在铁轨（道砟/钢轨）横向范围内。命中则该杆隐藏：
+   杆子插在轨道上视觉上是错的，而主线铁轨又必须压在最上层。 */
+function poleHitsRail(br,offset,s){
+  const RAIL_PAD=1.8;      // 正线道砟半宽
+  const SIDE_PAD=1.55;     // 侧线道砟半宽
+  const bases=br.single?[LX]:[LX,RX];
+  for(const base of bases)
+    if(Math.abs(offset-base)<RAIL_PAD) return true;
+  for(const st of br.stations){
+    if(Math.abs(s-st.center)>210) continue;
+    for(const leg of branchLegs(br,st)){
+      const o=leg.baseX+leg.sign*sideOffsetForStation(s,st);
+      if(Math.abs(offset-o)<SIDE_PAD) return true;
+    }
+  }
+  return false;
+}
+
+/* 岔路接触网电杆（与主线 drawPole 同形同色） */
+function drawBranchPole(br,offset,s,dir){
+  if(poleHitsRail(br,offset,s)) return;     // 底面在铁轨上 → 隐藏
+  const pB=projectBranch(br,offset,0,s), pT=projectBranch(br,offset,8.5,s);
+  const pA=projectBranch(br,offset-dir*2.2,8.0,s);
+  if(!pB||!pT||!pA) return;
+  ctx.strokeStyle='#5a6670';
+  const wPx=Math.max(1.5,0.18*FOCAL/pB.z);
+  ctx.lineWidth=wPx;
+  ctx.beginPath();ctx.moveTo(pB.x,pB.y);ctx.lineTo(pT.x,pT.y);ctx.stroke();
+  ctx.lineWidth=Math.max(1,wPx*0.7);
+  ctx.beginPath();ctx.moveTo(pT.x,pT.y);ctx.lineTo(pA.x,pA.y);ctx.stroke();
+}
+
+/* 岔路站内横跨门架（与主线 drawGantry 同形） */
+function drawBranchGantry(br,s,hw,yB,yT){
+  const pLB=projectBranch(br,-hw,yB,s), pLT=projectBranch(br,-hw,yT,s);
+  const pRB=projectBranch(br,hw,yB,s), pRT=projectBranch(br,hw,yT,s);
+  if(!pLB||!pLT||!pRB||!pRT) return;
+  ctx.strokeStyle='#5a6670';
+  const wPx=Math.max(1.5,0.18*FOCAL/pLB.z);
+  ctx.lineWidth=wPx;
+  ctx.beginPath();ctx.moveTo(pLB.x,pLB.y);ctx.lineTo(pLT.x,pLT.y);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(pRB.x,pRB.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
+  ctx.lineWidth=Math.max(1,wPx*0.7);
+  ctx.beginPath();ctx.moveTo(pLT.x,pLT.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
+}
+
+/* 岔路接触线（WIRE_Y 高度，逐段折线，与主线 drawWireFunc 同宽同色） */
+function drawBranchWire(br,offsetFn,sA,sB){
+  if(sB<=sA) return;
+  const segs=Math.max(4,Math.ceil((sB-sA)/12));
+  let prev=null;
+  for(let i=0;i<=segs;i++){
+    const s=sA+(sB-sA)*i/segs;
+    const off=(typeof offsetFn==='function')?offsetFn(s):offsetFn;
+    const p=projectBranch(br,off,WIRE_Y,s);
+    if(!p){prev=null;continue;}
+    if(prev){
+      ctx.strokeStyle='rgba(120,130,140,0.85)'; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(p.x,p.y);ctx.stroke();
+    }
+    prev=p;
+  }
+}
+
+/* 岔路侧线接触线（贴合 sideOffsetForStation 的进出） */
+function drawBranchSideWire(br,baseX,sign,st,sA,sB){
+  if(sB<=sA) return;
+  const segs=Math.max(4,Math.ceil((sB-sA)/6));
+  let prev=null;
+  for(let i=0;i<=segs;i++){
+    const s=sA+(sB-sA)*i/segs;
+    const off=sideOffsetForStation(s,st);
+    if(off<0.05){prev=null;continue;}
+    const p=projectBranch(br,baseX+sign*off,WIRE_Y,s);
+    if(!p){prev=null;continue;}
+    if(prev){
+      ctx.strokeStyle='rgba(120,130,140,0.85)'; ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(prev.x,prev.y);ctx.lineTo(p.x,p.y);ctx.stroke();
+    }
+    prev=p;
+  }
+}
+
+/* 岔路接触网总成：与主线 drawCatenaryRange + drawStationGantryRange +
+   drawSideWiresRange 相同的三段结构（站外电杆+接触线、站内门架、侧线接触线） */
+function drawBranchCatenary(br,sA,sB){
+  const ln=LINES[br.key];
+  if(!ln||!lineIsElec(ln)) return;         // 非电气化线路不画接触网
+  const bases=br.single?[LX]:[LX,RX];
+  /* 站外：每 50 单位一根电杆 + 每股一条接触线 */
+  for(const base of bases){
+    const sgn=base<0?-1:+1;
+    for(let s=Math.ceil(sA/50)*50;s<sB;s+=50){
+      let inSt=false;
+      for(const st of br.stations) if(Math.abs(s-st.center)<190){inSt=true;break;}
+      if(inSt) continue;
+      drawBranchPole(br,base+sgn*2.0,s,sgn);
+    }
+    drawBranchWire(br,()=>base,sA,sB);
+  }
+  /* 站内：横跨门架 + 侧线接触线 */
+  for(const st of br.stations){
+    if(st.center<sA-220||st.center>sB+220) continue;
+    let gHW=SIDE_OFF+G_BR+0.3+platW(st)+0.5;
+    for(const leg of branchLegs(br,st)){
+      const outer=leg.baseX+leg.sign*(SIDE_OFF+G_BR+0.3+platW(st));
+      gHW=Math.max(gHW,Math.abs(outer)+0.5);
+    }
+    const gs=st.center+SW_IN_START, ge=st.center+SW_OUT_END;
+    for(let s=Math.ceil(gs/25)*25;s<=ge;s+=25) drawBranchGantry(br,s,gHW,0,8.5);
+    for(const leg of branchLegs(br,st))
+      drawBranchSideWire(br,leg.baseX,leg.sign,st,gs,ge);
+  }
+}
+
+/* 岔路布景：按到相机的距离由远及近绘制（正确的遮挡顺序） */
+function drawBranchScenery(br,sA,sB){
+  const vis=[];
+  for(const o of br.scenery){
+    if(o.s<sA-80||o.s>sB+80) continue;
+    const q=branchPoint(br,o.s);
+    const cx=Math.cos(q.h), sz=-Math.sin(q.h);
+    const wx=q.x+cx*(o.side*o.offset), wz=q.z+sz*(o.side*o.offset);
+    const dx=wx-camWorldX, dz=wz-camWorldZ;
+    vis.push({o:o,d2:dx*dx+dz*dz});
+  }
+  vis.sort((a,b)=>b.d2-a.d2);
+  for(const it of vis){
+    const o=it.o;
+    if(o.house){
+      const oC=o.side*o.offset;
+      drawBranchAABB(br,o.s,o.d,oC-o.w/2,oC+o.w/2,0,o.h);
+    }else{
+      const off=o.side*o.offset;
+      const pB=projectBranch(br,off,0,o.s), pT=projectBranch(br,off,o.size,o.s);
+      if(!pB||!pT) continue;
+      const hPix=pB.y-pT.y; if(hPix<3) continue;
+      ctx.fillStyle='#5d4037';
+      const tw=Math.max(1.5,hPix*0.09);
+      ctx.fillRect(pB.x-tw/2,pT.y,tw,hPix);
+      const cw=hPix*0.85, ch=hPix*0.95;
+      ctx.fillStyle='#2e7d32';
+      ctx.beginPath();
+      ctx.moveTo(pB.x,pT.y-ch*0.15);
+      ctx.lineTo(pB.x-cw/2,pT.y+ch*0.45);
+      ctx.lineTo(pB.x+cw/2,pT.y+ch*0.45);
+      ctx.closePath();ctx.fill();
+    }
+  }
+}
+
+/* 岔路版简单房子（正面+屋顶，颜色同主线小屋） */
+function drawBranchAABB(br,sC,depth,oL,oR,yB,yT){
+  const sL=sC-depth/2, sR=sC+depth/2;
+  fillPolyBranch(br,[{offset:oL,y:yB,s:sL},{offset:oR,y:yB,s:sL},
+                     {offset:oR,y:yT,s:sL},{offset:oL,y:yT,s:sL}],'#d4c2a4',true);
+  fillPolyBranch(br,[{offset:oL,y:yT,s:sL},{offset:oR,y:yT,s:sL},
+                     {offset:oR,y:yT,s:sR},{offset:oL,y:yT,s:sR}],'#b8a888',true);
+}
+
+/* phase='ground'：布景/道砟/轨枕/钢轨/站台 —— 画在主线 drawRails 之前，
+   保证【任务经由线（主线）的铁轨永远压在最上层】；
+   phase='top'：接触网 —— 最后画，但杆底压到铁轨的杆子直接隐藏。 */
+/* 遍历当前可见的岔路：统一算绘制窗口，回调 (br,sA,sB,bs)。
+   窗口 = 岔路上与主线列车「平行」的位置 ± 视程，远离锚站整条不画。 */
+function eachBranch(cb){
+  if(appState!=='PLAYING'&&appState!=='PAUSED') return;
+  if(!currentLine||!currentStations||!currentStations.length) return;
+  for(const br of buildBranches()){
+    if(Math.abs(trainPos-br.anchorS)>3200) continue;
+    const bs=br.anchorCum+(trainPos-br.anchorS);
+    const sA=Math.max(0,bs-250), sB=Math.min(br.trackEnd,bs+1100);
+    if(sB<=sA+50) continue;
+    cb(br,sA,sB,bs);
+  }
+}
+
+/* 尺寸与主线 drawBallast/drawSleepers/drawRails 完全一致 */
+const BG=0.7175, BRW=0.07, BRH=0.16, BBW=1.8;
+
+/* ---- 道砟（正线 + 站内侧线），对应主线 drawBallast ---- */
+function drawBranchBallast(br,sA,sB){
+  const bases=br.single?[LX]:[LX,RX];
+  for(const base of bases){
+    for(let i=0;i<140;i++){
+      const a=sA+(sB-sA)*i/140, b=sA+(sB-sA)*(i+1)/140;
+      fillPolyBranch(br,[
+        {offset:base-BBW,y:0.005,s:a},{offset:base+BBW,y:0.005,s:a},
+        {offset:base+BBW,y:0.005,s:b},{offset:base-BBW,y:0.005,s:b}
+      ],'#4d5055');
+    }
+  }
+  for(const st of br.stations){
+    if(st.center<sA-260||st.center>sB+260) continue;
+    const sC=st.center+SW_IN_START, sD=st.center+SW_OUT_END;
+    for(const leg of branchLegs(br,st)){
+      const oF=s=>leg.baseX+leg.sign*sideOffsetForStation(s,st);
+      for(let i=0;i<40;i++){
+        const a=sC+(sD-sC)*i/40, b=sC+(sD-sC)*(i+1)/40;
+        fillPolyBranch(br,[
+          {offset:oF(a)-1.5,y:0.004,s:a},{offset:oF(a)+1.5,y:0.004,s:a},
+          {offset:oF(b)+1.5,y:0.004,s:b},{offset:oF(b)-1.5,y:0.004,s:b}
+        ],'#4d5055');
+      }
+    }
+  }
+}
+
+/* ---- 轨枕（正线 + 站内侧线整木），对应主线 drawSleepers ---- */
+function drawBranchSleepers(br,sA,sB){
+  const bases=br.single?[LX]:[LX,RX];
+  for(let s=Math.ceil(sA/1.2)*1.2;s<sB;s+=1.2){
+    for(const base of bases){
+      fillPolyBranch(br,[
+        {offset:base-1.2,y:0.08,s:s},{offset:base+1.2,y:0.08,s:s},
+        {offset:base+1.2,y:0.08,s:s+0.24},{offset:base-1.2,y:0.08,s:s+0.24}
+      ],'#3a3228');
+    }
+  }
+  for(const st of br.stations){
+    if(st.center<sA-260||st.center>sB+260) continue;
+    const sC=st.center+SW_IN_START, sD=st.center+SW_OUT_END;
+    for(const leg of branchLegs(br,st)){
+      const oF=s=>leg.baseX+leg.sign*sideOffsetForStation(s,st);
+      for(let s=Math.ceil(sC/1.2)*1.2;s<sD;s+=1.2){
+        const o=oF(s);
+        const lo=Math.min(leg.baseX,o)-1.2, hi=Math.max(leg.baseX,o)+1.2;
+        fillPolyBranch(br,[
+          {offset:lo,y:0.08,s:s},{offset:hi,y:0.08,s:s},
+          {offset:hi,y:0.08,s:s+0.24},{offset:lo,y:0.08,s:s+0.24}
+        ],'#3a3228');
+      }
+    }
+  }
+}
+
+/* ---- 钢轨（正线 + 站内侧线），对应主线 drawRails（岔路先画，主线压在上层） ---- */
+function drawBranchRails(br,sA,sB){
+  const bases=br.single?[LX]:[LX,RX];
+  for(const base of bases){
+    for(let i=0;i<100;i++){
+      const a=sA+(sB-sA)*i/100, b=sA+(sB-sA)*(i+1)/100;
+      for(const w of [-BG,BG]){
+        fillPolyBranch(br,[
+          {offset:base+w,y:BRH,s:a},{offset:base+w+BRW,y:BRH,s:a},
+          {offset:base+w+BRW,y:BRH,s:b},{offset:base+w,y:BRH,s:b}
+        ],'#98a4b0');
+        fillPolyBranch(br,[
+          {offset:base+w,y:BRH+0.006,s:a},{offset:base+w+BRW*0.55,y:BRH+0.006,s:a},
+          {offset:base+w+BRW*0.55,y:BRH+0.006,s:b},{offset:base+w,y:BRH+0.006,s:b}
+        ],'#cfd8e3');
+      }
+    }
+  }
+  for(const st of br.stations){
+    if(st.center<sA-260||st.center>sB+260) continue;
+    const sC=st.center+SW_IN_START, sD=st.center+SW_OUT_END;
+    for(const leg of branchLegs(br,st)){
+      const oF=s=>leg.baseX+leg.sign*sideOffsetForStation(s,st);
+      for(let i=0;i<40;i++){
+        const a=sC+(sD-sC)*i/40, b=sC+(sD-sC)*(i+1)/40;
+        for(const w of [-BG,BG]){
+          fillPolyBranch(br,[
+            {offset:oF(a)+w,y:BRH,s:a},{offset:oF(a)+w+BRW,y:BRH,s:a},
+            {offset:oF(b)+w+BRW,y:BRH,s:b},{offset:oF(b)+w,y:BRH,s:b}
+          ],'#98a4b0');
+        }
+      }
+    }
+  }
+}
+
+/* ---- 站台（顶面/内立面/坡面/端面/黄色安全线），对应主线 drawOnePlatform ---- */
+function drawBranchPlatforms(br,sA,sB,bs){
+  for(const st of br.stations){
+    if(st.center<sA-260||st.center>sB+260) continue;
+    for(const leg of branchLegs(br,st)){
+      const PH=platH(st), PW=platW(st);
+      const sA2=st.center+SW_IN_END, sB2=st.center+PLAT_END;
+      const oIn=s=>leg.baseX+leg.sign*(sideOffsetForStation(s,st)+BG+0.3);
+      const oOut=s=>oIn(s)+leg.sign*PW;
+      const oSlp=s=>oOut(s)+leg.sign*PLAT_SLOPE_W;
+      fillPolyBranch(br,[{offset:oSlp(sA2),y:0,s:sA2},{offset:oOut(sA2),y:PH,s:sA2},
+                         {offset:oOut(sB2),y:PH,s:sB2},{offset:oSlp(sB2),y:0,s:sB2}],'#a8a8a8');
+      fillPolyBranch(br,[{offset:oIn(sA2),y:PH,s:sA2},{offset:oOut(sA2),y:PH,s:sA2},
+                         {offset:oOut(sB2),y:PH,s:sB2},{offset:oIn(sB2),y:PH,s:sB2}],'#f2f2f2');
+      fillPolyBranch(br,[{offset:oIn(sA2),y:0,s:sA2},{offset:oIn(sA2),y:PH,s:sA2},
+                         {offset:oIn(sB2),y:PH,s:sB2},{offset:oIn(sB2),y:0,s:sB2}],'#d4d4d4');
+      if(bs<sA2-0.5||bs>sB2+0.5){
+        fillPolyBranch(br,[{offset:oIn(sA2),y:PH,s:sA2},{offset:oOut(sA2),y:PH,s:sA2},
+                           {offset:oSlp(sA2),y:0,s:sA2},{offset:oIn(sA2),y:0,s:sA2}],'#8a9098');
+        fillPolyBranch(br,[{offset:oIn(sB2),y:PH,s:sB2},{offset:oOut(sB2),y:PH,s:sB2},
+                           {offset:oSlp(sB2),y:0,s:sB2},{offset:oIn(sB2),y:0,s:sB2}],'#7a8088');
+      }
+      if(needSafetyLine(st)){
+        for(let s=Math.ceil(sA2/0.6)*0.6;s<sB2;s+=0.6){
+          fillPolyBranch(br,[
+            {offset:oIn(s),y:PH+0.008,s:s},{offset:oIn(s)+leg.sign*0.13,y:PH+0.008,s:s},
+            {offset:oIn(s)+leg.sign*0.13,y:PH+0.008,s:s+0.4},{offset:oIn(s),y:PH+0.008,s:s+0.4}
+          ],'#f5c518');
+        }
+      }
+      for(let s=Math.ceil(sA2/1.2)*1.2;s<sB2;s+=1.2){
+        fillPolyBranch(br,[
+          {offset:oIn(s),y:PH+0.006,s:s},{offset:oOut(s),y:PH+0.006,s:s},
+          {offset:oOut(s),y:PH+0.006,s:s+0.035},{offset:oIn(s),y:PH+0.006,s:s+0.035}
+        ],'rgba(175,175,175,0.75)');
+      }
+    }
+  }
+}
+
+/* 岔路统一入口：按与主线完全相同的绘制阶段分派。
+   主线层级：布景 → 接触网 → 道砟 → 站台 → 轨枕 → 钢轨，
+   岔路插在对应阶段之后（钢轨在主线之前，保证主线压最上层）。 */
+function drawBranchTracks(phase){
+  if(phase==='scenery')        eachBranch((br,sA,sB)=>drawBranchScenery(br,sA,sB));
+  else if(phase==='catenary')  eachBranch((br,sA,sB)=>drawBranchCatenary(br,sA,sB));
+  else if(phase==='ballast')   eachBranch((br,sA,sB)=>drawBranchBallast(br,sA,sB));
+  else if(phase==='platform')  eachBranch((br,sA,sB,bs)=>drawBranchPlatforms(br,sA,sB,bs));
+  else if(phase==='sleeper')   eachBranch((br,sA,sB)=>drawBranchSleepers(br,sA,sB));
+  else if(phase==='rails')     eachBranch((br,sA,sB)=>drawBranchRails(br,sA,sB));
+}
+
+/* ================= 我的档案：用户名 / EXP 等级 / 累计里程时长 / 成就 =================
+   数据存 localStorage（jjsim_profile_v1）：
+   {name, exp, km, minutes, runs, ach:[]}
+   - 任务完成时：score 记为 EXP、本次任务总里程计入 km、本次游戏时长计入 minutes
+   - EXP 换算等级（1→2 级需 500，之后每级 +250）
+   - 累计里程 / 时长 / 次数 / 等级 解锁成就
+   ================================================================== */
+const PROFILE_KEY='jjsim_profile_v1';
+
+function defaultProfile(){ return {name:'司机', exp:0, km:0, minutes:0, runs:0, ach:[]}; }
+function loadProfile(){
+  try{
+    const o=JSON.parse(localStorage.getItem(PROFILE_KEY)||'null');
+    if(o&&typeof o==='object') return Object.assign(defaultProfile(),o);
+  }catch(e){}
+  return defaultProfile();
+}
+/* 用 var：游戏初始化时 renderDrive() 早于本模块执行，var 提升为 undefined 不抛 TDZ，
+   各渲染函数内判空即可。 */
+var PROFILE=loadProfile();
+function saveProfile(){ try{ localStorage.setItem(PROFILE_KEY,JSON.stringify(PROFILE)); }catch(e){} }
+
+/* 等级：LV1→2 需 500 EXP，之后每升一级门槛 +250 */
+function lvInfo(exp){
+  exp=Math.max(0, +exp||0);
+  let lv=1, need=500, acc=0;
+  while(exp>=acc+need && lv<99){ acc+=need; lv++; need+=250; }
+  return {lv:lv, into:exp-acc, need:need};
+}
+function lvOf(exp){ return lvInfo(exp).lv; }
+
+/* 成就表：test 基于累计数据判定 */
+const ACHIEVEMENTS=[
+  {id:'first',  icon:'🚂', name:'初次上路',   desc:'完成第 1 次任务',        test:p=>p.runs>=1},
+  {id:'km100',  icon:'🛤️', name:'百里之行',   desc:'累计驾驶 100 km',        test:p=>p.km>=100},
+  {id:'km500',  icon:'🚄', name:'五百里加急', desc:'累计驾驶 500 km',        test:p=>p.km>=500},
+  {id:'km2000', icon:'🌄', name:'千里铁道',   desc:'累计驾驶 2000 km',       test:p=>p.km>=2000},
+  {id:'km10000',icon:'🏔️', name:'万里征程',   desc:'累计驾驶 10000 km',      test:p=>p.km>=10000},
+  {id:'t60',    icon:'⏱️', name:'一小时司机', desc:'累计驾驶 1 小时',        test:p=>p.minutes>=60},
+  {id:'t600',   icon:'🕙', name:'十小时老司机',desc:'累计驾驶 10 小时',      test:p=>p.minutes>=600},
+  {id:'t3000',  icon:'🎖️', name:'五十小时坚守',desc:'累计驾驶 50 小时',      test:p=>p.minutes>=3000},
+  {id:'runs10', icon:'📘', name:'熟能生巧',   desc:'完成 10 次任务',         test:p=>p.runs>=10},
+  {id:'runs50', icon:'📚', name:'资深乘务',   desc:'完成 50 次任务',         test:p=>p.runs>=50},
+  {id:'lv5',    icon:'⭐', name:'五级司机',   desc:'等级达到 LV5',           test:p=>lvOf(p.exp)>=5},
+  {id:'lv10',   icon:'🌟', name:'十级司机',   desc:'等级达到 LV10',          test:p=>lvOf(p.exp)>=10}
+];
+
+/* 本次任务记录（开局时填） */
+const runInfo={startMin:0, startPos:0, taskKm:0};
+function profileBeginRun(){
+  runInfo.startMin=gameTimeMin;
+  runInfo.startPos=trainPos;
+  const sts=(currentLine&&currentLine.stations)||[];
+  runInfo.taskKm = sts.length>1 ? Math.abs(+sts[sts.length-1].km - +sts[0].km) : 0;
+}
+
+/* 任务结束：成功才累积 EXP / 里程 / 时长，并检查成就 */
+function profileRecordRun(failed){
+  if(failed) return null;
+  const dur=Math.max(0, gameTimeMin-runInfo.startMin);
+  const gained=Math.max(0, Math.round(score||0));
+  PROFILE.exp += gained;
+  PROFILE.km += runInfo.taskKm;
+  PROFILE.minutes += dur;
+  PROFILE.runs += 1;
+  const newly=[];
+  for(const a of ACHIEVEMENTS){
+    if(PROFILE.ach.indexOf(a.id)<0 && a.test(PROFILE)){ PROFILE.ach.push(a.id); newly.push(a); }
+  }
+  saveProfile();
+  return {exp:gained, km:runInfo.taskKm, minutes:dur, ach:newly};
+}
+
+/* 时长格式：x 小时 y 分 */
+function fmtDuration(min){
+  min=Math.max(0,Math.round(min));
+  const h=Math.floor(min/60), m=min%60;
+  return h>0 ? (h+' 小时 '+(m<10?'0':'')+m+' 分') : (m+' 分');
+}
+
+/* ---------- 结算页追加 "本次获得" ---------- */
+function appendResultProfile(rec){
+  const box=document.getElementById('result-detail');
+  if(!box||!rec) return;
+  let html='<div style="margin-top:10px;padding-top:10px;border-top:1px dashed #334155;color:#93c5fd">'+
+    '<div>本次经验　+'+rec.exp+' EXP</div>'+
+    '<div>本次里程　'+rec.km.toFixed(1)+' km</div>'+
+    '<div>本次时长　'+fmtDuration(rec.minutes)+'</div>'+
+    '<div style="margin-top:4px;color:#fbbf24">累计里程　'+PROFILE.km.toFixed(1)+' km　·　累计时长　'+fmtDuration(PROFILE.minutes)+'</div>'+
+    '</div>';
+  if(rec.ach&&rec.ach.length){
+    html+='<div style="margin-top:8px;color:#4ade80;font-weight:700">🏅 解锁成就：'+
+      rec.ach.map(a=>a.icon+' '+a.name).join('、')+'</div>';
+  }
+  box.insertAdjacentHTML('beforeend',html);
+}
+
+/* ---------- 档案页渲染 ---------- */
+function renderProfile(){
+  if(!PROFILE) return;
+  const lv=lvInfo(PROFILE.exp);
+  const nameInput=document.getElementById('prof-name');
+  if(nameInput && document.activeElement!==nameInput) nameInput.value=PROFILE.name;
+
+  const lvBox=document.getElementById('prof-lv-box');
+  if(lvBox){
+    const pct=Math.max(0,Math.min(100, lv.into/lv.need*100));
+    lvBox.innerHTML=
+      '<div style="display:flex;align-items:center;gap:14px">'+
+        '<div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#1d4ed8,#0ea5e9);'+
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;flex:none">'+
+          '<div style="font-size:10px;color:#bfdbfe;letter-spacing:1px">LV</div>'+
+          '<div style="font-size:24px;font-weight:700;color:#fff;line-height:1">'+lv.lv+'</div>'+
+        '</div>'+
+        '<div style="flex:1">'+
+          '<div style="font-size:15px;font-weight:700;color:#e8eef7">'+esc(PROFILE.name)+'</div>'+
+          '<div style="font-size:12px;color:#94a3b8;margin:2px 0 6px">总经验 '+PROFILE.exp+' EXP　·　距离 LV'+(lv.lv+1)+' 还需 '+(lv.need-lv.into)+'</div>'+
+          '<div style="height:8px;border-radius:6px;background:#1e293b;overflow:hidden">'+
+            '<div style="height:100%;width:'+pct.toFixed(1)+'%;background:linear-gradient(90deg,#22c55e,#84cc16)"></div>'+
+          '</div>'+
+        '</div>'+
+      '</div>';
+  }
+
+  const stats=document.getElementById('prof-stats');
+  if(stats){
+    stats.innerHTML=
+      '<div class="panel-label">累计记录</div>'+
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px">'+
+        statCell('累计驾驶里程', PROFILE.km.toFixed(1)+' km')+
+        statCell('累计驾驶时长', fmtDuration(PROFILE.minutes))+
+        statCell('完成任务', PROFILE.runs+' 次')+
+        statCell('等级', 'LV '+lv.lv)+
+      '</div>';
+  }
+
+  const achBox=document.getElementById('prof-ach');
+  if(achBox){
+    achBox.innerHTML=ACHIEVEMENTS.map(a=>{
+      const got=PROFILE.ach.indexOf(a.id)>=0;
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;'+
+        'background:'+(got?'rgba(34,197,94,0.12)':'rgba(148,163,184,0.07)')+';'+
+        'border:1px solid '+(got?'rgba(34,197,94,0.45)':'#1e293b')+';'+
+        'opacity:'+(got?'1':'0.55')+'">'+
+        '<div style="font-size:20px;filter:'+(got?'none':'grayscale(1)')+'">'+a.icon+'</div>'+
+        '<div style="flex:1">'+
+          '<div style="font-size:13px;font-weight:700;color:'+(got?'#86efac':'#94a3b8')+'">'+a.name+'</div>'+
+          '<div style="font-size:11px;color:#64748b">'+a.desc+'</div>'+
+        '</div>'+
+        (got?'<div style="font-size:11px;color:#4ade80">已解锁</div>':'<div style="font-size:11px;color:#475569">未解锁</div>')+
+      '</div>';
+    }).join('');
+  }
+}
+function statCell(label,val){
+  return '<div style="background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:10px 12px">'+
+    '<div style="font-size:11px;color:#64748b">'+label+'</div>'+
+    '<div style="font-size:16px;font-weight:700;color:#e8eef7;margin-top:3px">'+val+'</div></div>';
+}
+
+/* ---------- 主页摘要 ---------- */
+function renderHomeProfile(){
+  if(!PROFILE) return;
+  const kmEl=document.getElementById('home-prof-km');
+  const timeEl=document.getElementById('home-prof-time');
+  const lvEl=document.getElementById('home-prof-lv');
+  if(kmEl) kmEl.textContent=PROFILE.km.toFixed(1)+' km';
+  if(timeEl) timeEl.textContent=fmtDuration(PROFILE.minutes);
+  if(lvEl) lvEl.textContent='LV '+lvInfo(PROFILE.exp).lv+' · '+esc(PROFILE.name);
+}
+
+/* ---------- 档案页绑定（只绑一次） ---------- */
+(function initProfileUI(){
+  const btn=document.getElementById('prof-save-name');
+  const inp=document.getElementById('prof-name');
+  if(btn&&inp){
+    btn.addEventListener('click',()=>{
+      const n=String(inp.value||'').trim().slice(0,12);
+      PROFILE.name=n||'司机';
+      saveProfile();
+      renderProfile(); renderHomeProfile();
+      showMsg('用户名已保存：'+PROFILE.name, 2);
+    });
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter') btn.click(); });
+  }
+})();
+
+/* 初次加载：本模块晚于游戏初始化，主动刷一次主页摘要 */
+try{ if(typeof renderHomeProfile==='function') renderHomeProfile(); }catch(e){}
 
 
 /* ================= 地图模块初始化 ================= */
