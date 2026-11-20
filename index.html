@@ -662,6 +662,8 @@ function schedAbsMin(hhmm, now){
 function getTrainLimit(trainNo) {
   if (!trainNo) return 120;
   const first = String(trainNo)[0].toUpperCase();
+  if (first === 'G') return 350;
+  if (first === 'D') return 250;
   if (first === 'Z') return 160;
   if (first === 'T') return 140;
   if (first === 'K') return 120;
@@ -842,7 +844,7 @@ function buildLineSegments(line){
     const sng=(st._srcSingle!==undefined)?st._srcSingle:lineSingle;
     const elc=(st._srcElec  !==undefined)?st._srcElec  :lineElec;
     STATION_DEFS.push({
-      name:st.name,center,big:isTe(st),cls:clsOf(st),km:st.km,
+      name:st.name,center,big:isTe(st),cls:clsOf(st),km:st.km,capHalf:!!st.capHalf,
       _single:sng,_elec:elc,                       // 本站的线路属性（交界站会被改成复线）
       _outSingle:(st._outSingle!==undefined)?st._outSingle:sng,
       _outElec:(st._outElec!==undefined)?st._outElec:elc,
@@ -955,16 +957,20 @@ function buildLineSegments(line){
 let currentLine=null;
 
 // 线路限速：基础限速，叠加"本站→下一站区间"的特殊限速（interLimit）覆盖
-function getLineLimitAt(s){
-  let lim = currentLine ? currentLine.maxSpeed : 160;
+function getLineLimitAt(s, baseOverride){
+  let lim = (baseOverride!=null) ? baseOverride : (currentLine ? currentLine.maxSpeed : 160);
   for(const iv of INTERVALS){
     if(s>=iv.s0 && s<=iv.s1 && iv.interLimit!=null){ lim = iv.interLimit; break; }
   }
   return lim;
 }
 function getLimitAt(s){
-  let lim=Math.min(999, getLineLimitAt(s));
-  lim=Math.min(lim,getTrainLimit(trainNo));
+  const kindLim=getTrainLimit(trainNo);
+  /* G/D 字头：车种限速（350/250）作为基础限速，覆盖线路基础限速；
+     区间限速、180°弯道限速、信号限速仍然取小值生效。 */
+  const hsr=(kindLim===350||kindLim===250);
+  let lim=Math.min(999, getLineLimitAt(s, hsr?kindLim:null));
+  lim=Math.min(lim, kindLim!=null?kindLim:999);
   for(const seg of SEGMENTS){
     // 仅 180 度弯道限速；90 度弯道不再限速（lim180 只对 180 度弧段为 true）
     if(seg.type==='a'&&seg.lim180&&s>=seg.s0&&s<=seg.s1){lim=Math.min(lim,80);break;}
@@ -1179,7 +1185,7 @@ function buildCompositeLine(task){
                             : ((sNext) ? flipCurveLR(sNext.curveAfter||'none') : 'none');
       out.push({
         name:s.name, km:baseKm+rebased[j],
-        cls:s.cls||(s.big?'te':'5'),
+        cls:s.cls||(s.big?'te':'5'), capHalf:!!s.capHalf,
         terrain:s.terrain||'plain', color:s.color||'green',
         curveAfter: curve,
         spdLim: s.spdLim,   // 本站→下一站区间的自定义限速（透传给复合线路；不填随线路基础限速）
@@ -1265,8 +1271,11 @@ function platH(st){return isHighPlat(st)?PLAT_H_BIG:PLAT_H_SMALL;}
 // te 特等(=原大站，带站房/隧道) · 1 一等(高站台·无柱雨棚)
 // 2 二等(高站台·有柱雨棚) · 3 三等(高站台·无雨棚)
 // 4 四等(低站台·有柱雨棚) · 5 五等(低站台·无雨棚 = 原小站)
-const STATION_CLASSES=['te','1','2','3','4','5'];
-const CLASS_LABELS={te:'特等站','1':'一等站','2':'二等站','3':'三等站','4':'四等站','5':'五等站'};
+/* 二等/四等站分「全雨棚」「半雨棚」：下拉值带 h 后缀表示半雨棚，
+   存 cls 时去掉后缀、另记 capHalf=true（半雨棚 = 只有站台 1/4~3/4 段有棚）。 */
+const STATION_CLASSES=['te','1','2','2h','3','4','4h','5'];
+const CLASS_LABELS={te:'特等站','1':'一等站','2':'二等站（全雨棚）','2h':'二等站（半雨棚）',
+                    '3':'三等站','4':'四等站（全雨棚）','4h':'四等站（半雨棚）','5':'五等站'};
 function clsOf(st){ return st&&st.cls ? st.cls : (st&&st.big ? 'te' : '5'); }
 function isTe(st){ return clsOf(st)==='te'; }
 function isHighPlat(st){ const c=clsOf(st); return c==='te'||c==='1'||c==='2'||c==='3'; }
@@ -3138,7 +3147,13 @@ function drawOnePlatform(st){
 // 一等无柱=平顶贯通大跨；二等有柱=水平+柱；四等普通=中线最低、向股道侧与外侧两端上翘（横截面 y=|x| 形）+多柱
 function drawCanopy(st){
   const PH=platH(st);
-  const sA=st.center+SW_IN_END, sB=st.center+PLAT_END;
+  let sA=st.center+SW_IN_END, sB=st.center+PLAT_END;
+  /* 半雨棚：只有站台纵向 1/4~3/4 段有棚（其余为露天站台） */
+  if(st.capHalf){
+    const len=sB-sA;
+    sA=sA+len*0.25;
+    sB=sA+len*0.5;
+  }
   const PW=platW(st);
   const ov=0.4;                                     // 沿纵向轻微出檐（不算"边"）
   if(isPillarless(st)){
@@ -4649,7 +4664,7 @@ function startGame(){
     const def=STATION_DEFS.find(d=>d.name===e.name);
     if(!def)return null;
     return{
-      name:e.name,center:def.center,big:isTe(def),cls:def.cls,
+      name:e.name,center:def.center,big:isTe(def),cls:def.cls,capHalf:!!def.capHalf,
       selected:true,stop:!!e.stop,techStop:!!e.techStop,
       arr:e.arr,dep:e.dep,track:e.track||1,
       _cmdSent:false,
@@ -5066,7 +5081,7 @@ function renderLineTable(line){
       '<td><input type="text" data-i="'+i+'" data-f="name" value="'+st.name+'"></td>'+
       '<td><input type="number" data-i="'+i+'" data-f="km" value="'+st.km+'" min="0" step="1"></td>'+
       '<td><select data-i="'+i+'" data-f="cls" style="width:100%;padding:3px">'+
-        STATION_CLASSES.map(c=>'<option value="'+c+'" '+((st.cls||(st.big?'te':'5'))===c?'selected':'')+'>'+CLASS_LABELS[c]+'</option>').join('')+
+        STATION_CLASSES.map(c=>{const cur=(st.cls||(st.big?'te':'5'))+(st.capHalf?'h':'');return '<option value="'+c+'" '+(cur===c?'selected':'')+'>'+CLASS_LABELS[c]+'</option>';}).join('')+
       '</select></td>'+
       '<td><select data-i="'+i+'" data-f="terrain" style="width:100%;padding:3px">'+
         '<option value="plain" '+((st.terrain||'plain')==='plain'?'selected':'')+'>平原</option>'+
@@ -5090,7 +5105,12 @@ function renderLineTable(line){
       const i=+e.target.dataset.i;
       const f=e.target.dataset.f;
       const line=LINES[editingLineKey];
-      if(f==='cls')line.stations[i].cls=e.target.value;
+      if(f==='cls'){
+        let v=e.target.value, half=false;
+        if(v.endsWith('h')){ half=true; v=v.slice(0,-1); }
+        line.stations[i].cls=v;
+        if(half) line.stations[i].capHalf=true; else delete line.stations[i].capHalf;
+      }
       else if(f==='km')line.stations[i].km=+e.target.value||0;
       else if(f==='spdLim')line.stations[i].spdLim = (e.target.value!=='') ? (+e.target.value) : undefined;
       else line.stations[i][f]=e.target.value;
@@ -5401,7 +5421,10 @@ function exportTask(key){
   const text = packText('task', {
     task: {
       name:task.name, trainNo:task.trainNo, direction:task.direction,
-      startTime:task.startTime, via:clone(task.via), schedule:clone(task.schedule)
+      startTime:task.startTime, via:clone(task.via), schedule:clone(task.schedule),
+      locoModel:task.locoModel||'', locoNo:task.locoNo||'', locoOwner:task.locoOwner||'',
+      carModel:task.carModel||'', crew:task.crew||'',
+      trainOrigin:task.trainOrigin||'', trainTerminus:task.trainTerminus||''
     },
     lines: linesObj
   });
@@ -5522,7 +5545,10 @@ function commitImportedTask(t, via, lineKey){
   const no = String(t.trainNo||'').toUpperCase();
   const base = {
     name:t.name, trainNo:t.trainNo, direction:t.direction||'down',
-    startTime:t.startTime, via:via, schedule:t.schedule||[]
+    startTime:t.startTime, via:via, schedule:t.schedule||[],
+    locoModel:t.locoModel||'', locoNo:t.locoNo||'', locoOwner:t.locoOwner||'',
+    carModel:t.carModel||'', crew:t.crew||'',
+    trainOrigin:t.trainOrigin||'', trainTerminus:t.trainTerminus||''
   };
   let taskKey = findTaskKey(lineKey, t.trainNo);
   let taskMsg;
