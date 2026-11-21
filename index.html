@@ -2392,6 +2392,10 @@ function virtBehindKm(){
 }
 
 function drawPole(offset,s,dir){
+  /* 杆子下端严格不得碰灰色道砟：落在任一线路（主线/岔路）的道砟上就隐身。
+     自身那股道砟用 'm'+bx 排除，否则杆子会永远贴着自己道砟边被判命中。 */
+  const w0=trackToWorld(offset,s);
+  if(roccHit(w0.x,w0.z,'m'+(offset-dir*2.0))) return;
   const pB=projectTrack(offset,0,s);
   const pT=projectTrack(offset,8.5,s);
   const pA=projectTrack(offset-dir*2.2,8.0,s);
@@ -2411,8 +2415,10 @@ function drawGantry(s,hw,yB,yT){
   ctx.strokeStyle='#5a6670';
   const wPx=Math.max(1.5,0.18*FOCAL/pLB.z);
   ctx.lineWidth=wPx;
-  ctx.beginPath();ctx.moveTo(pLB.x,pLB.y);ctx.lineTo(pLT.x,pLT.y);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(pRB.x,pRB.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
+  /* 立柱下端压到道砟的那一根不画（横梁照画，避免整座门架消失） */
+  const gL=trackToWorld(-hw,s), gR=trackToWorld(hw,s);
+  if(!roccHit(gL.x,gL.z,null)){ ctx.beginPath();ctx.moveTo(pLB.x,pLB.y);ctx.lineTo(pLT.x,pLT.y);ctx.stroke(); }
+  if(!roccHit(gR.x,gR.z,null)){ ctx.beginPath();ctx.moveTo(pRB.x,pRB.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke(); }
   ctx.lineWidth=Math.max(1,wPx*0.7);
   ctx.beginPath();ctx.moveTo(pLT.x,pLT.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
 }
@@ -3483,6 +3489,37 @@ function dispatchNextTarget(st){
        南仓站向南去津山线、向西去天津西，两个方向各有走法 → 报。
    前进方向取"当前站→前方目标站 a"的地图向量（同名站已重合），
    再统计该站所有线路的邻站里，与 a 同向（点积>0.35）且不等于 a 的走法。 */
+/* 该站在【实际行进方向】上的地图切线（已按经由方向翻转）。
+   经由可以反向（via 的 from 在线路站序里排在 to 后面，例如上行 天津西→北京），
+   这时线路自身的切线是"反的"，必须乘 -1。否则"报去向"会把来路当成去路，
+   导致上行线路每一站都报"去X站方向"（用户 2026-11-21 反馈）。 */
+function routeFwdAt(name){
+  const nm=String(name||'').trim();
+  const tk=(typeof currentTaskKey!=='undefined'&&TASKS[currentTaskKey])||
+           (typeof selTaskKey!=='undefined'&&TASKS[selTaskKey])||null;
+  if(!nm||!tk||!Array.isArray(tk.via)) return null;
+  let lineId=null, sign=1;
+  for(const v of tk.via){
+    const ln=LINES[v.lineId]; if(!ln||!Array.isArray(ln.stations)) continue;
+    const fi=ln.stations.findIndex(s=>String(s.name||'').trim()===String(v.from||'').trim());
+    const ti=ln.stations.findIndex(s=>String(s.name||'').trim()===String(v.to||'').trim());
+    if(fi<0||ti<0||fi===ti) continue;
+    const idx=ln.stations.findIndex(s=>String(s.name||'').trim()===nm);
+    const isFrom=String(v.from||'').trim()===nm;
+    if(!isFrom && (idx<0||idx<Math.min(fi,ti)||idx>Math.max(fi,ti))) continue;
+    lineId=v.lineId; sign=(ti>fi)?1:-1;
+    if(isFrom) break;        // 枢纽站优先用"发出本段"的方向
+  }
+  if(!lineId) return null;
+  let lay=null;
+  try{ lay=buildMapLayout(MAP_SEL,taskMapKeys()); }catch(e){ lay=null; }
+  if(!lay||!lay.lines) return null;
+  const L=lay.lines.find(l=>l.key===lineId);
+  if(!L||!L.stations) return null;
+  const s2=L.stations.find(s=>String(s.name||'').trim()===nm);
+  if(!s2||s2.dx===undefined) return null;
+  return {x:s2.dx*sign, y:s2.dy*sign};
+}
 function dispatchForwardBranch(st){
   const nm=String(st.name||'').trim();
   const a=dispatchNextTarget(st);
@@ -3492,17 +3529,19 @@ function dispatchForwardBranch(st){
   let lay=null;
   try{ lay=buildMapLayout(MAP_SEL,taskMapKeys()); }catch(e){ lay=null; }
   if(!lay||!lay.lines.length) return false;
-  /* 前进方向 = 【列车实际经由线路】上该站的出站切线（st.dx,st.dy），
+  /* 前进方向 = 【实际行进方向】上的出站切线（st.dx,st.dy，反向经由已乘 -1）。
      不是"本站→下一站中心"的连线 —— 首站带 R180 掉头时两者正好相反
      （用户真实数据：北京站首站向东，R180 后北京南在南边，连线朝南但出站朝东）。
      没有经由切线时才退回连线方向。 */
   const mine=taskMapKeys();   // 现算，不读全局：出生播报时 MAP_TASK_KEYS 还没被 mapPrepare 设置
-  let fwd=null;
-  for(const L of lay.lines){
-    if(mine.indexOf(L.key)<0)continue;
-    for(const s of L.stations)
-      if(String(s.name||'').trim()===nm && s.dx!==undefined){fwd={x:s.dx,y:s.dy};break;}
-    if(fwd)break;
+  let fwd=routeFwdAt(nm);
+  if(!fwd){
+    for(const L of lay.lines){
+      if(mine.indexOf(L.key)<0)continue;
+      for(const s of L.stations)
+        if(String(s.name||'').trim()===nm && s.dx!==undefined){fwd={x:s.dx,y:s.dy};break;}
+      if(fwd)break;
+    }
   }
   /* 收集该站坐标与所有邻站（各线路前后各一），同名站坐标重合 */
   let S=null; const nb=[];
@@ -6591,53 +6630,119 @@ function buildBranches(){
   const list=[];
   const via=(task&&task.via)||[];
   const mainKey=via.length?via[0].lineId:'';
-  for(const k of taskMapKeys()){
-    if(k===mainKey) continue;
-    const ln=LINES[k];
-    if(!ln||!Array.isArray(ln.stations)||ln.stations.length<2) continue;
-    try{ const br=makeBranch(ln,k); if(br) list.push(br); }catch(e){}
+  /* 焊接点表：先灌主线各站的世界坐标 + 朝向。每放置一条岔路就把它的站
+     登记进去，后面的岔路就能同时焊到主线【和先前岔路】上——这才是
+     "多进一 / 联络线汇入"：一条联络线两端的同名站都必须落在既有路网上。 */
+  const pins={};
+  for(const st of STATION_DEFS){
+    const a=centerLine(st.center);
+    if(a) pins[String(st.name||'').trim()]={x:a.x,z:a.z,h:a.heading};
+  }
+  const keys=taskMapKeys().filter(k=>k!==mainKey&&LINES[k]&&
+      Array.isArray(LINES[k].stations)&&LINES[k].stations.length>=2);
+  const geoms={};
+  for(const k of keys){ try{ geoms[k]=buildMapLineGeom(LINES[k]); }catch(e){ geoms[k]=null; } }
+  const left=keys.slice();
+  while(left.length){
+    /* 每轮挑"已知焊接点最多"的那条先放，保证联络线两端都有落点。 */
+    let bi=-1,bn=0;
+    for(let x=0;x<left.length;x++){
+      const g=geoms[left[x]]; if(!g||!g.stations) continue;
+      const seen={}; let n=0;
+      for(const st of g.stations){
+        const nm=String(st.name||'').trim();
+        if(!nm||seen[nm]) continue; seen[nm]=1;
+        if(pins[nm]) n++;
+      }
+      if(n>bn){ bn=n; bi=x; }
+    }
+    if(bi<0) break;                     // 剩下的与已放置路网毫无交集
+    const k=left.splice(bi,1)[0];
+    try{
+      const br=makeBranch(LINES[k],k,geoms[k],pins);
+      if(br){
+        list.push(br);
+        for(const st of br.stations){
+          if(st.x===undefined) continue;
+          pins[String(st.name||'').trim()]={x:st.x,z:st.z,h:st._h};
+        }
+      }
+    }catch(e){}
   }
   BRANCH_CACHE={sig:sig,list:list};
   return list;
 }
 
-/* 把一条线路变成 3D 世界里的独立线路实体：
-   锚站 = 第一个与主线 STATION_DEFS 同名的站；以主线该站世界坐标为锚，
-   切线对齐旋转 th=主线heading-岔路heading，再沿主线右法线错开 D。 */
-function makeBranch(ln,lineKey){
-  const g=buildMapLineGeom(ln);
+/* 把一条线路变成 3D 世界里的独立线路实体。
+   焊接规则（用户 2026-11-21：枢纽要"一进多"也要"多进一"）：
+   - 与既有路网同名的站全部当焊接点；
+   - 焊接点 >=2 → 分段仿射（相邻两焊点间用一个复数比例 = 旋转+等比缩放），
+     这样两端都严格重合，联络线才会真的"汇入"另一条线，而不是擦身而过；
+   - 焊接点 ==1 → 切线对齐 + 平移（岔路从枢纽站自然岔出）；
+   - 一个都没有 → 不放置。 */
+function makeBranch(ln,lineKey,g,pins){
+  if(!g||!g.path||g.path.length<2||!g.stations||!g.stations.length) return null;
   const single=!!lineIsSingle(ln);
-  let bst=null, mst=null;
-  for(const s of g.stations){
-    const d=STATION_DEFS.find(x=>x.name===s.name);
-    if(d){ bst=s; mst=d; break; }
+  const pl=[]; const seen={};
+  for(const st of g.stations){
+    const nm=String(st.name||'').trim();
+    if(!nm||seen[nm]) continue;
+    const P=pins[nm];
+    if(P&&P.h!==undefined){ seen[nm]=1; pl.push({s:st,P:P}); }
   }
-  if(!bst||!mst) return null;
-  const anchor=centerLine(mst.center);
-  if(!anchor) return null;
-  const th=anchor.heading-bst.h;
-  const ct=Math.cos(th), sn=Math.sin(th);
-  /* 横向错开 D=0：与地图完全一致——同名站严格重合、四条道叠在一起，
-     出站后由各自真实几何（主线 R180 掉头 / 岔路直行）自然分开。 */
-  const D=0;
-  const nx=Math.cos(anchor.heading), nz=-Math.sin(anchor.heading);
-  const ax=anchor.x+nx*D, az=anchor.z+nz*D;
-  const R=(x,z)=>({x:ax+(x-bst.x)*ct+(z-bst.y)*sn,
-                   z:az-(x-bst.x)*sn+(z-bst.y)*ct});
-  const path=g.path.map(p=>{const q=R(p.x,p.y);return{x:q.x,z:q.z,cum:p.cum};});
-  for(let i=0;i<path.length;i++){
-    const a=path[Math.max(0,i-1)], b=path[Math.min(path.length-1,i+1)];
-    path[i].h=Math.atan2(b.x-a.x,b.z-a.z);
+  if(!pl.length) return null;
+  pl.sort((a,b)=>a.s.cum-b.s.cum);
+  let mapXY, anchorCum;
+  if(pl.length>=2){
+    const segs=[];
+    for(let n=0;n<pl.length-1;n++){
+      const A=pl[n],B=pl[n+1];
+      const ox=B.s.x-A.s.x, oy=B.s.y-A.s.y;
+      const tx=B.P.x-A.P.x, tz=B.P.z-A.P.z;
+      const d2=ox*ox+oy*oy;
+      if(d2<1e-3) continue;            // 同位置焊点，跳过（避免除零）
+      segs.push({c0:A.s.cum,c1:B.s.cum,ox:A.s.x,oy:A.s.y,tx:A.P.x,tz:A.P.z,
+                 mr:(tx*ox+tz*oy)/d2, mi:(tz*ox-tx*oy)/d2});
+    }
+    if(!segs.length) return null;
+    mapXY=(x,y,cum)=>{
+      let sg=segs[0];
+      if(cum>=segs[0].c0&&cum<=segs[segs.length-1].c1){
+        for(const q of segs) if(cum>=q.c0&&cum<=q.c1){sg=q;break;}
+      }else if(cum>segs[segs.length-1].c1) sg=segs[segs.length-1];
+      const dx=x-sg.ox, dy=y-sg.oy;
+      return {x:sg.tx+(dx*sg.mr-dy*sg.mi), z:sg.tz+(dx*sg.mi+dy*sg.mr)};
+    };
+    anchorCum=pl[0].s.cum;
+  }else{
+    const A=pl[0];
+    const th=A.P.h-(A.s.h||0);
+    const ct=Math.cos(th), sn=Math.sin(th);
+    mapXY=(x,y)=>({x:A.P.x+(x-A.s.x)*ct+(y-A.s.y)*sn,
+                   z:A.P.z-(x-A.s.x)*sn+(y-A.s.y)*ct});
+    anchorCum=A.s.cum;
   }
-  const stations=g.stations.map(s=>{
-    const q=R(s.x,s.y);
-    return {name:s.name, center:s.cum, cls:s.cls, big:s.cls==='te',
-            _single:single, _side:s.side||-1};
+  const path=g.path.map(p=>{const q=mapXY(p.x,p.y,p.cum);return{x:q.x,z:q.z,cum:p.cum};});
+  for(let n=0;n<path.length;n++){
+    const a=path[Math.max(0,n-1)], b=path[Math.min(path.length-1,n+1)];
+    path[n].h=Math.atan2(b.x-a.x,b.z-a.z);
+  }
+  const cumH=cum=>{
+    if(cum<=path[0].cum) return path[0].h;
+    if(cum>=path[path.length-1].cum) return path[path.length-1].h;
+    for(let n=0;n<path.length-1;n++)
+      if(cum>=path[n].cum&&cum<=path[n+1].cum) return path[n].h;
+    return path[path.length-1].h;
+  };
+  const stations=g.stations.map(st=>{
+    const q=mapXY(st.x,st.y,st.cum);
+    return {name:st.name, center:st.cum, cls:st.cls, big:st.cls==='te',
+            _single:single, _side:st.side||-1, x:q.x, z:q.z, _h:cumH(st.cum)};
   });
-  /* 岔路布景：两侧树/小房（与主线 buildScenery 同类），只生成锚站附近约 5km */
+  /* 岔路布景：两侧树/小房（与主线 buildScenery 同类），覆盖绘制窗口 */
   const scenery=[];
-  let ss=Math.max(bst.cum-600,0);
-  const sEnd=Math.min(bst.cum+4600, path[path.length-1].cum);
+  let ss=Math.max(0,anchorCum-1600);
+  const sEnd=Math.min(anchorCum+5200, path[path.length-1].cum);
   while(ss<sEnd){
     let inSt=false;
     for(const s2 of stations) if(Math.abs(ss-s2.center)<200){inSt=true;break;}
@@ -6651,9 +6756,25 @@ function makeBranch(ln,lineKey){
     }
     ss+=9+Math.random()*16;
   }
+  /* 绘制窗口锚：优先取"直接落在主线上"的焊接点 */
+  let anchorS=null;
+  for(const p2 of pl){
+    const nm=String(p2.s.name||'').trim();
+    const d=STATION_DEFS.find(x=>x.name===nm);
+    if(d){ anchorS=d.center; anchorCum=p2.s.cum; break; }
+  }
+  if(anchorS===null){
+    let best=1e18;
+    for(const p2 of pl) for(const d of STATION_DEFS){
+      const a=centerLine(d.center); if(!a) continue;
+      const dd=(a.x-p2.P.x)*(a.x-p2.P.x)+(a.z-p2.P.z)*(a.z-p2.P.z);
+      if(dd<best){best=dd;anchorS=d.center;anchorCum=p2.s.cum;}
+    }
+  }
+  if(anchorS===null) anchorS=STATION_DEFS.length?STATION_DEFS[0].center:0;
   return {name:ln.name||'', key:lineKey||'', single:single, path:path, stations:stations,
-          trackEnd:path[path.length-1].cum, scenery:scenery,
-          anchorS:mst.center, anchorCum:bst.cum};
+          trackEnd:path[path.length-1].cum, scenery:scenery, pins:pl.length,
+          anchorS:anchorS, anchorCum:anchorCum};
 }
 
 /* 岔路里程 s → 世界坐标（path 插值；返回 {x,z,h}） */
@@ -6712,6 +6833,114 @@ function projectBranch(br,offset,y,s){
   return {x:W*0.5+FOCAL*c.x/c.z, y:HORIZON+FOCAL*(CAM_Y-c.y)/c.z, z:c.z};
 }
 
+/* ================= 铁路道砟占位表（杆子下端严禁压轨） =================
+   把本帧【所有可见线路】的道砟（正线两股 + 站内侧线）采样成世界坐标线段，
+   登记进 4 单位粗网格。任何电杆/门架立柱画之前先测距，命中就隐身——
+   这样主线杆子不会插到岔路道砟里，岔路杆子也不会插到主线/别的岔路道砟里。
+   自身那股道砟按 own 标识跳过（否则杆子永远贴着自己的道砟边被判命中）。 */
+var ROCC_CELL=4, ROCC_PAD=0.08;   // 只容差"贴着"：杆子本身已在道砟外 0.2
+var _rocc=null, _roccKey='';
+
+function roccEnsure(){
+  /* 占位表是【世界坐标】结构，跟相机无关；只在列车走过 20 单位后重建一次，
+     免得每帧都重建（5ms/帧 太重）。窗口 ±1100，20 的滞后看不出来。 */
+  const key=(currentTaskKey||'')+'#'+Math.round(trainPos/20);
+  if(_rocc&&_roccKey===key) return;
+  const grid=new Map();
+  const push=(x1,z1,x2,z2,hw,own)=>{
+    const r=hw+ROCC_PAD, c=ROCC_CELL;
+    const minx=Math.min(x1,x2)-r, maxx=Math.max(x1,x2)+r;
+    const minz=Math.min(z1,z2)-r, maxz=Math.max(z1,z2)+r;
+    for(let gx=Math.floor(minx/c);gx<=Math.floor(maxx/c);gx++)
+      for(let gz=Math.floor(minz/c);gz<=Math.floor(maxz/c);gz++){
+        const kk=gx+'|'+gz;
+        let arr=grid.get(kk); if(!arr){arr=[];grid.set(kk,arr);}
+        arr.push(x1,z1,x2,z2,hw,own);
+      }
+  };
+  const STEP=8;
+  let sA=0,sB=0;
+  try{ const v=getVisibleRange(80,900); sA=Math.max(v[0],0); sB=Math.min(v[1],TRACK_END); }catch(e){ sB=0; }
+  if(sB>sA){
+    /* 主线正线 */
+    for(const rg of trackRanges(sA,sB)){
+      const bases=rg.single?[runBaseX((rg.s0+rg.s1)/2)]:[LX,RX];
+      for(const bx of bases){
+        for(let sv=rg.s0;sv<rg.s1;sv+=STEP){
+          const e=Math.min(rg.s1,sv+STEP);
+          const a=trackToWorld(bx,sv), b=trackToWorld(bx,e);
+          push(a.x,a.z,b.x,b.z,1.8,'m'+bx);
+        }
+      }
+    }
+    /* 主线站内侧线 */
+    for(const st of currentStations){
+      if(st.center<sA-320||st.center>sB+320) continue;
+      const sC=st.center+SW_IN_START, sD=st.center+SW_OUT_END;
+      for(const leg of stationLegs(st)){
+        for(let sv=sC;sv<sD;sv+=STEP){
+          const e=Math.min(sD,sv+STEP);
+          const o1=leg.baseX+leg.sign*sideOffsetForStation(sv,st);
+          const o2=leg.baseX+leg.sign*sideOffsetForStation(e,st);
+          const a=trackToWorld(o1,sv), b=trackToWorld(o2,e);
+          push(a.x,a.z,b.x,b.z,1.5,'ms'+leg.baseX);
+        }
+      }
+    }
+  }
+  /* 岔路 */
+  try{
+    eachBranch((br,bA,bB)=>{
+      const bases=br.single?[LX]:[LX,RX];
+      for(const bx of bases){
+        for(let sv=bA;sv<bB;sv+=STEP){
+          const e=Math.min(bB,sv+STEP);
+          const p1=branchPoint(br,sv), p2=branchPoint(br,e);
+          const c1=Math.cos(p1.h), n1=-Math.sin(p1.h);
+          const c2=Math.cos(p2.h), n2=-Math.sin(p2.h);
+          push(p1.x+c1*bx,p1.z+n1*bx,p2.x+c2*bx,p2.z+n2*bx,1.8,br.key+'|'+bx);
+        }
+      }
+      for(const st of br.stations){
+        if(st.center<bA-320||st.center>bB+320) continue;
+        const sC=st.center+SW_IN_START, sD=st.center+SW_OUT_END;
+        for(const leg of branchLegs(br,st)){
+          for(let sv=sC;sv<sD;sv+=STEP){
+            const e=Math.min(sD,sv+STEP);
+            const o1=leg.baseX+leg.sign*sideOffsetForStation(sv,st);
+            const o2=leg.baseX+leg.sign*sideOffsetForStation(e,st);
+            const pa=branchPoint(br,sv), pb=branchPoint(br,e);
+            const ca=Math.cos(pa.h), na=-Math.sin(pa.h);
+            const cb=Math.cos(pb.h), nb=-Math.sin(pb.h);
+            push(pa.x+ca*o1,pa.z+na*o1,pb.x+cb*o2,pb.z+nb*o2,1.5,br.key+'|s'+leg.baseX);
+          }
+        }
+      }
+    });
+  }catch(e){}
+  _rocc=grid; _roccKey=key;
+}
+
+/* 世界点是否压在"别人家"的道砟上。own 为空表示自己那股也一起算。 */
+function roccHit(wx,wz,own){
+  roccEnsure();
+  if(!_rocc) return false;
+  const c=ROCC_CELL;
+  const arr=_rocc.get(Math.floor(wx/c)+'|'+Math.floor(wz/c));
+  if(!arr) return false;
+  for(let n=0;n<arr.length;n+=6){
+    if(own&&arr[n+5]===own) continue;
+    const x1=arr[n],z1=arr[n+1],x2=arr[n+2],z2=arr[n+3],hw=arr[n+4];
+    const vx=x2-x1, vz=z2-z1, L2=vx*vx+vz*vz;
+    let t=L2>1e-9?((wx-x1)*vx+(wz-z1)*vz)/L2:0;
+    t=t<0?0:(t>1?1:t);
+    const dx=wx-(x1+vx*t), dz=wz-(z1+vz*t);
+    const rr=hw+ROCC_PAD;
+    if(dx*dx+dz*dz < rr*rr) return true;
+  }
+  return false;
+}
+
 /* 杆底是否落在铁轨（道砟/钢轨）横向范围内。命中则该杆隐藏：
    杆子插在轨道上视觉上是错的，而主线铁轨又必须压在最上层。 */
 function poleHitsRail(br,offset,s){
@@ -6732,7 +6961,10 @@ function poleHitsRail(br,offset,s){
 
 /* 岔路接触网电杆（与主线 drawPole 同形同色） */
 function drawBranchPole(br,offset,s,dir){
-  if(poleHitsRail(br,offset,s)) return;     // 底面在铁轨上 → 隐藏
+  if(poleHitsRail(br,offset,s)) return;     // 自己这条线的轨道上也绝不立柱
+  const q0=branchPoint(br,s);
+  const w0x=q0.x+Math.cos(q0.h)*offset, w0z=q0.z-Math.sin(q0.h)*offset;
+  if(roccHit(w0x,w0z,br.key+'|'+(offset-dir*2.0))) return;   // 压在别人家道砟上 → 隐藏
   const pB=projectBranch(br,offset,0,s), pT=projectBranch(br,offset,8.5,s);
   const pA=projectBranch(br,offset-dir*2.2,8.0,s);
   if(!pB||!pT||!pA) return;
@@ -6752,8 +6984,14 @@ function drawBranchGantry(br,s,hw,yB,yT){
   ctx.strokeStyle='#5a6670';
   const wPx=Math.max(1.5,0.18*FOCAL/pLB.z);
   ctx.lineWidth=wPx;
-  ctx.beginPath();ctx.moveTo(pLB.x,pLB.y);ctx.lineTo(pLT.x,pLT.y);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(pRB.x,pRB.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
+  const gq=branchPoint(br,s);
+  const gcx=Math.cos(gq.h), gsz=-Math.sin(gq.h);
+  if(!roccHit(gq.x-gcx*hw,gq.z-gsz*hw,null)){
+    ctx.beginPath();ctx.moveTo(pLB.x,pLB.y);ctx.lineTo(pLT.x,pLT.y);ctx.stroke();
+  }
+  if(!roccHit(gq.x+gcx*hw,gq.z+gsz*hw,null)){
+    ctx.beginPath();ctx.moveTo(pRB.x,pRB.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
+  }
   ctx.lineWidth=Math.max(1,wPx*0.7);
   ctx.beginPath();ctx.moveTo(pLT.x,pLT.y);ctx.lineTo(pRT.x,pRT.y);ctx.stroke();
 }
